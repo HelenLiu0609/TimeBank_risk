@@ -1,0 +1,479 @@
+---
+title: "Uncertainty Perception Analysis - Paired-Samples t-Tests"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, warning = FALSE, message = FALSE)
+```
+
+```{r}
+library(tidyverse)
+library(readxl)
+library(janitor)
+library(ggplot2)
+library(ggsignif)
+library(effsize)
+library(patchwork)
+
+options(scipen = 999)
+```
+
+# Data loading
+
+```{r}
+df <- read_excel("RiskData2.xlsx") %>%
+  row_to_names(row_number = 1)
+
+q_names <- paste0("Q", 1:ncol(df))
+names(df) <- q_names
+df
+```
+
+# Data preprocessing
+
+```{r}
+df_uncertainty <- df %>%
+  dplyr::select("Q150":"Q156",
+                "Q159":"Q165",
+                "Q168":"Q174",
+                "Q177":"Q183",
+                "Q187":"Q193",
+                "Q196":"Q202",
+                "Q205":"Q211",
+                "Q214":"Q220") %>%
+  rename(
+    # Time Bank - Mortality uncertainty
+    mortality_clarity = Q150,
+    mortality_relevance = Q151,
+    mortality_worry = Q152,
+    mortality_likelihood = Q153,
+    mortality_control = Q154,
+    mortality_emotion_state = Q155,
+    mortality_emotion_intensity = Q156,
+
+    # Time Bank - Aging uncertainty
+    aging_clarity = Q159,
+    aging_relevance = Q160,
+    aging_worry = Q161,
+    aging_likelihood = Q162,
+    aging_control = Q163,
+    aging_emotion_state = Q164,
+    aging_emotion_intensity = Q165,
+
+    # Time Bank - Policy uncertainty
+    policy_clarity = Q168,
+    policy_relevance = Q169,
+    policy_worry = Q170,
+    policy_likelihood = Q171,
+    policy_control = Q172,
+    policy_emotion_state = Q173,
+    policy_emotion_intensity = Q174,
+
+    # Time Bank - Economic uncertainty
+    economic_clarity = Q177,
+    economic_relevance = Q178,
+    economic_worry = Q179,
+    economic_likelihood = Q180,
+    economic_control = Q181,
+    economic_emotion_state = Q182,
+    economic_emotion_intensity = Q183,
+
+    # Money Bank - Mortality uncertainty
+    money_mortality_clarity = Q187,
+    money_mortality_relevance = Q188,
+    money_mortality_worry = Q189,
+    money_mortality_likelihood = Q190,
+    money_mortality_control = Q191,
+    money_mortality_emotion_state = Q192,
+    money_mortality_emotion_intensity = Q193,
+
+    # Money Bank - Aging uncertainty
+    money_aging_clarity = Q196,
+    money_aging_relevance = Q197,
+    money_aging_worry = Q198,
+    money_aging_likelihood = Q199,
+    money_aging_control = Q200,
+    money_aging_emotion_state = Q201,
+    money_aging_emotion_intensity = Q202,
+
+    # Money Bank - Policy uncertainty
+    money_policy_clarity = Q205,
+    money_policy_relevance = Q206,
+    money_policy_worry = Q207,
+    money_policy_likelihood = Q208,
+    money_policy_control = Q209,
+    money_policy_emotion_state = Q210,
+    money_policy_emotion_intensity = Q211,
+
+    # Money Bank - Economic uncertainty
+    money_economic_clarity = Q214,
+    money_economic_relevance = Q215,
+    money_economic_worry = Q216,
+    money_economic_likelihood = Q217,
+    money_economic_control = Q218,
+    money_economic_emotion_state = Q219,
+    money_economic_emotion_intensity = Q220
+  ) %>%
+  mutate(across(everything(), as.numeric))
+
+df_uncertainty$ID <- 1:nrow(df_uncertainty)
+```
+
+# Long format
+
+```{r}
+df_uncertainty_long <- df_uncertainty %>%
+  pivot_longer(
+    cols = -ID,
+    names_to = "variable",
+    values_to = "score"
+  ) %>%
+  mutate(
+    bank = ifelse(grepl("^money_", variable), "Money Bank", "Time Bank"),
+    variable_clean = gsub("^money_", "", variable),
+
+    uncertainty = case_when(
+      grepl("^mortality_", variable_clean) ~ "Mortality uncertainty",
+      grepl("^aging_", variable_clean) ~ "Aging uncertainty",
+      grepl("^policy_", variable_clean) ~ "Policy uncertainty",
+      grepl("^economic_", variable_clean) ~ "Economic uncertainty",
+      TRUE ~ NA_character_
+    ),
+
+    dimension = case_when(
+      grepl("_clarity$", variable_clean) ~ "Clarity",
+      grepl("_relevance$", variable_clean) ~ "Relevance",
+      grepl("_worry$", variable_clean) ~ "Worry",
+      grepl("_likelihood$", variable_clean) ~ "Likelihood",
+      grepl("_control$", variable_clean) ~ "Control",
+      grepl("_emotion_state$", variable_clean) ~ "Emotion State",
+      grepl("_emotion_intensity$", variable_clean) ~ "Emotion Intensity",
+      TRUE ~ NA_character_
+    )
+  ) %>%
+  filter(!is.na(uncertainty), !is.na(dimension))
+
+df_uncertainty_long
+```
+
+# Paired-samples t-tests
+
+```{r}
+df_wide <- df_uncertainty_long %>%
+  pivot_wider(
+    id_cols = c(ID, uncertainty, dimension),
+    names_from = bank,
+    values_from = score
+  ) %>%
+  rename(time_score = `Time Bank`, money_score = `Money Bank`) %>%
+  mutate(difference = time_score - money_score)
+
+paired_results <- df_wide %>%
+  group_by(dimension, uncertainty) %>%
+  summarise(
+    time_mean  = mean(time_score, na.rm = TRUE),
+    money_mean = mean(money_score, na.rm = TRUE),
+    time_sd    = sd(time_score, na.rm = TRUE),
+    money_sd   = sd(money_score, na.rm = TRUE),
+    diff_mean  = mean(difference, na.rm = TRUE),
+    diff_sd    = sd(difference, na.rm = TRUE),
+    diff_se    = sd(difference, na.rm = TRUE) / sqrt(n()),
+    p_value = tryCatch(t.test(time_score, money_score, paired = TRUE)$p.value,
+                       error = function(e) NA_real_),
+    t_statistic = tryCatch(t.test(time_score, money_score, paired = TRUE)$statistic,
+                           error = function(e) NA_real_),
+    n_pairs = sum(!is.na(time_score) & !is.na(money_score)),
+    .groups = "drop"
+  ) %>%
+  mutate(
+    cohens_d = diff_mean / diff_sd,
+    p_fdr = p.adjust(p_value, method = "fdr"),
+    sig_fdr = case_when(
+      is.na(p_fdr) ~ "",
+      p_fdr < 0.001 ~ "***",
+      p_fdr < 0.01  ~ "**",
+      p_fdr < 0.05  ~ "*",
+      TRUE ~ ""
+    ),
+    p_fdr_formatted = ifelse(p_fdr < 0.001, "<0.001", sprintf("%.4f", p_fdr))
+  )
+
+significant_fdr <- paired_results %>%
+  filter(p_fdr < 0.05) %>%
+  arrange(p_fdr) %>%
+  dplyr::select(dimension, uncertainty, diff_mean, p_fdr, sig_fdr, cohens_d)
+
+print("Paired-samples t-tests (FDR corrected) - significant results (p < .05):")
+print(significant_fdr)
+```
+
+# Means and standard errors for plotting
+
+```{r}
+df_summary <- df_uncertainty_long %>%
+  group_by(bank, uncertainty, dimension) %>%
+  summarise(
+    mean_score = mean(score, na.rm = TRUE),
+    sd_score   = sd(score, na.rm = TRUE),
+    se_score   = sd(score, na.rm = TRUE) / sqrt(n()),
+    n = n(),
+    .groups = "drop"
+  )
+
+uncertainty_order <- c("Mortality uncertainty", "Aging uncertainty",
+                       "Policy uncertainty", "Economic uncertainty")
+df_summary$uncertainty <- factor(df_summary$uncertainty, levels = uncertainty_order)
+paired_results$uncertainty <- factor(paired_results$uncertainty, levels = uncertainty_order)
+
+uncertainty_numeric <- c("Mortality uncertainty" = 1,
+                         "Aging uncertainty" = 2,
+                         "Policy uncertainty" = 3,
+                         "Economic uncertainty" = 4)
+
+x_min <- min(df_summary$mean_score - df_summary$se_score, na.rm = TRUE) - 0.2
+x_max <- max(df_summary$mean_score + df_summary$se_score, na.rm = TRUE) + 0.8
+```
+
+# Figure 1: Clarity (manipulation check)
+
+```{r}
+df_clarity <- df_summary %>% filter(dimension == "Clarity")
+
+signif_clarity <- paired_results %>%
+  filter(dimension == "Clarity", sig_fdr != "") %>%
+  mutate(
+    max_mean = pmax(time_mean, money_mean),
+    x_pos = max_mean + 0.4,
+    y_pos = uncertainty_numeric[as.character(uncertainty)]
+  )
+
+p_clarity <- ggplot(df_clarity, aes(x = mean_score, y = uncertainty, fill = bank)) +
+  geom_col(position = position_dodge(0.8), width = 0.7) +
+  geom_errorbar(aes(xmin = mean_score - se_score, xmax = mean_score + se_score),
+                position = position_dodge(0.8), width = 0.2) +
+  scale_fill_manual(values = c("Time Bank" = "#2E86AB", "Money Bank" = "#A23B72")) +
+  geom_text(data = signif_clarity,
+            aes(x = x_pos, y = y_pos, label = sig_fdr),
+            size = 6, color = "red", fontface = "bold", inherit.aes = FALSE) +
+  labs(title = "Clarity: Time Bank vs Money Bank",
+       subtitle = "Red stars indicate significant differences (* p<.05, ** p<.01, *** p<.001, FDR corrected)",
+       x = "Mean Score (± SE)", y = "Uncertainty Type", fill = "Bank Type") +
+  theme_minimal() +
+  theme(
+    plot.title = element_text(hjust = 0.5, size = 16, face = "bold"),
+    plot.subtitle = element_text(hjust = 0.5, size = 11),
+    axis.title = element_text(size = 12),
+    axis.text.y = element_text(size = 10),
+    legend.position = "bottom",
+    legend.text = element_text(size = 10),
+    panel.grid.minor = element_blank()
+  ) +
+  coord_cartesian(xlim = c(x_min, x_max))
+
+p_clarity
+# ggsave("uncertainty_dimension_clarity.png", p_clarity, width = 8, height = 5, dpi = 300)
+```
+
+# Figure 2: Differences (Time Bank - Money Bank)
+
+```{r}
+dimensions_keep <- c("Likelihood", "Control", "Worry", "Emotion Intensity")
+
+diff_data <- paired_results %>%
+  filter(dimension %in% dimensions_keep) %>%
+  mutate(uncertainty = factor(uncertainty,
+                              levels = c("Policy uncertainty", "Economic uncertainty",
+                                         "Mortality uncertainty", "Aging uncertainty")))
+
+plot_dimension <- function(dim_name) {
+  data_dim <- diff_data %>%
+    filter(dimension == dim_name) %>%
+    mutate(
+      max_se = max(diff_se, na.rm = TRUE),
+      offset = pmax(0.3, max_se * 0.8),
+      star_y = diff_mean + diff_se + offset
+    )
+
+  ggplot(data_dim, aes(x = uncertainty, y = diff_mean)) +
+    geom_hline(yintercept = 0, linetype = "dashed", color = "gray50", linewidth = 0.8) +
+    geom_col(fill = "#2E86AB", width = 0.7) +
+    geom_errorbar(aes(ymin = diff_mean - diff_se, ymax = diff_mean + diff_se),
+                  width = 0.2) +
+    geom_text(aes(y = star_y, label = sig_fdr),
+              size = 5, color = "red", fontface = "bold", vjust = 0, na.rm = TRUE) +
+    labs(title = dim_name, x = NULL, y = NULL) +
+    theme_minimal() +
+    theme(
+      plot.title = element_text(hjust = 0.5, size = 12, face = "bold"),
+      axis.text.x = element_text(angle = 45, hjust = 1, size = 9),
+      axis.text.y = element_text(size = 9),
+      axis.title = element_blank(),
+      legend.position = "none",
+      panel.grid.minor = element_blank()
+    ) +
+    coord_cartesian(clip = "off")
+}
+
+p_list <- lapply(dimensions_keep, plot_dimension)
+names(p_list) <- dimensions_keep
+
+combined_plot <- (p_list[["Likelihood"]] | p_list[["Control"]]) /
+  (p_list[["Worry"]] | p_list[["Emotion Intensity"]]) +
+  plot_layout(heights = c(1, 1)) +
+  plot_annotation(
+    title = "Uncertainty Perception Differences: Time Bank vs Money Bank",
+    theme = theme(plot.title = element_text(hjust = 0.5, size = 16, face = "bold"))
+  ) &
+  ylab("Difference (Time Bank - Money Bank) ± SE") &
+  xlab("Uncertainty Type")
+
+combined_plot
+# ggsave("uncertainty_differences.png", combined_plot, width = 10, height = 8, dpi = 300)
+```
+
+# Figure 3: Other dimensions
+
+```{r}
+df_summary_other <- df_summary %>% filter(dimension != "Clarity")
+
+dimension_order_other <- c("Relevance", "Likelihood", "Control",
+                           "Worry", "Emotion State", "Emotion Intensity")
+df_summary_other$dimension <- factor(df_summary_other$dimension,
+                                     levels = dimension_order_other)
+
+signif_other <- paired_results %>%
+  filter(dimension != "Clarity", sig_fdr != "") %>%
+  mutate(
+    max_mean = pmax(time_mean, money_mean),
+    x_pos = max_mean + 0.4,
+    y_pos = uncertainty_numeric[as.character(uncertainty)],
+    dimension = factor(dimension, levels = dimension_order_other)
+  )
+
+p_other <- ggplot(df_summary_other, aes(x = mean_score, y = uncertainty, fill = bank)) +
+  geom_col(position = position_dodge(0.8), width = 0.7) +
+  geom_errorbar(aes(xmin = mean_score - se_score, xmax = mean_score + se_score),
+                position = position_dodge(0.8), width = 0.2) +
+  scale_fill_manual(values = c("Time Bank" = "#2E86AB", "Money Bank" = "#A23B72")) +
+  facet_wrap(~ dimension, nrow = 2) +
+  geom_text(data = signif_other,
+            aes(x = x_pos, y = y_pos, label = sig_fdr),
+            size = 6, color = "red", fontface = "bold", inherit.aes = FALSE) +
+  labs(title = "Uncertainty Perceptions: Time Bank vs Money Bank",
+       x = "Mean Score (± SE)",
+       y = "Uncertainty Type",
+       fill = "Bank Type") +
+  theme_minimal() +
+  theme(
+    plot.title = element_text(hjust = 0.5, size = 16, face = "bold"),
+    axis.title.x = element_text(size = 12),
+    axis.title.y = element_text(size = 12),
+    axis.text.y = element_text(size = 10),
+    legend.position = "bottom",
+    legend.text = element_text(size = 10),
+    strip.text = element_text(size = 11, face = "bold"),
+    panel.spacing = unit(1, "lines")
+  ) +
+  coord_cartesian(xlim = c(x_min, x_max))
+
+p_other
+# ggsave("uncertainty_dimensions_other.png", p_other, width = 14, height = 8, dpi = 300)
+```
+
+# Save summary statistics
+
+```{r}
+summary_table <- paired_results %>%
+  dplyr::select(
+    dimension, uncertainty,
+    time_mean, time_sd,
+    money_mean, money_sd,
+    diff_mean, diff_sd, diff_se,
+    t_statistic, p_value, sig_fdr, cohens_d, n_pairs
+  ) %>%
+  mutate(
+    time_mean = round(time_mean, 2),
+    time_sd = round(time_sd, 2),
+    money_mean = round(money_mean, 2),
+    money_sd = round(money_sd, 2),
+    diff_mean = round(diff_mean, 3),
+    diff_sd = round(diff_sd, 3),
+    diff_se = round(diff_se, 3),
+    t_statistic = round(t_statistic, 3),
+    p_value = round(p_value, 4),
+    cohens_d = round(cohens_d, 3)
+  ) %>%
+  arrange(dimension, p_value)
+
+print("Paired-samples t-test summary:")
+print(summary_table)
+
+write.csv(summary_table, "uncertainty_comparison_paired_ttest.csv", row.names = FALSE)
+```
+
+# Manipulation check: one-sample t-tests
+
+```{r}
+ttest_table <- df_uncertainty_long %>%
+  mutate(
+    benchmark = if_else(grepl("Emotion State", dimension, ignore.case = TRUE), 5, 4)
+  ) %>%
+  group_by(bank, uncertainty, dimension, benchmark) %>%
+  group_modify(~{
+    x <- .x$score
+    mu <- unique(.y$benchmark)
+    tt <- t.test(x, mu = mu)
+    m <- mean(x, na.rm = TRUE)
+    s <- sd(x, na.rm = TRUE)
+
+    tibble(
+      n = sum(!is.na(x)),
+      mean = m,
+      sd = s,
+      mean_diff = m - mu,
+      t = unname(tt$statistic),
+      df = unname(tt$parameter),
+      p = tt$p.value,
+      cohens_d = ifelse(is.na(s) || s == 0, NA_real_, (m - mu) / s)
+    )
+  }) %>%
+  ungroup() %>%
+  arrange(bank, uncertainty, dimension)
+
+ttest_table
+
+write.csv(ttest_table, "one_sample_t_test_results.csv", row.names = FALSE)
+```
+
+# Clarity repeated-measures ANOVA
+
+```{r}
+clarity_wide <- df_uncertainty_long %>%
+  filter(dimension == "Clarity") %>%
+  dplyr::select(ID, bank, uncertainty, score) %>%
+  pivot_wider(
+    id_cols = c(ID, uncertainty),
+    names_from = bank,
+    values_from = score
+  ) %>%
+  rename(Time_Bank = `Time Bank`, Money_Bank = `Money Bank`)
+
+clarity_long <- clarity_wide %>%
+  pivot_longer(
+    cols = c(Time_Bank, Money_Bank),
+    names_to = "bank",
+    values_to = "clarity_score"
+  ) %>%
+  mutate(
+    bank = factor(bank, levels = c("Time_Bank", "Money_Bank")),
+    uncertainty = factor(uncertainty,
+                         levels = c("Mortality uncertainty", "Aging uncertainty",
+                                    "Policy uncertainty", "Economic uncertainty")),
+    ID = factor(ID)
+  )
+
+res_aov <- aov(clarity_score ~ bank * uncertainty + Error(ID / (bank * uncertainty)),
+               data = clarity_long)
+summary(res_aov)
+```
